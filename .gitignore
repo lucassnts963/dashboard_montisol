@@ -1,0 +1,6 @@
+.old
+.streamlit
+__pycache__
+rl
+venv
+.env
