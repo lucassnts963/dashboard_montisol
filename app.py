@@ -55,7 +55,7 @@ supabase = init_connection()
 
 @st.cache_data(ttl=60)
 def load_data(start_date, end_date):
-    response = supabase.table("view_producao_dashboard")\
+    response = supabase.table("view_dashboard")\
         .select("*")\
         .gte("date", start_date.isoformat())\
         .lte("date", end_date.isoformat())\
@@ -75,6 +75,11 @@ def load_data(start_date, end_date):
             
         df['shift_name'] = df['shift_name'].astype(str)
         df['equipment_tag'] = df['equipment_tag'].fillna('N/A')
+
+        df['maint_start_date'] = pd.to_datetime(df['maint_start_date'], errors='coerce').dt.strftime('%d/%m/%Y').fillna('-')
+        df['maint_due_date'] = pd.to_datetime(df['maint_due_date'], errors='coerce').dt.strftime('%d/%m/%Y').fillna('-')
+        df['maint_real_due_date'] = pd.to_datetime(df['maint_real_due_date'], errors='coerce').dt.strftime('%d/%m/%Y').fillna('-')
+        df['maint_status'] = df['maint_status'].fillna('Nao Definido').astype(str)
         
         if 'notes' not in df.columns: df['notes'] = ""
             
@@ -141,10 +146,8 @@ tab1, tab2, tab3 = st.tabs(["🖥️ Gestão à Vista", "📅 Relatório Diário
 with tab1:
     st.markdown("### 🚀 Painel de Acompanhamento Contratual")
     
-
-
     # ---------------------------------------------------------
-    # 2. ESTILIZAÇÃO E HTML DOS CARDS
+    # ESTILIZAÇÃO E HTML DOS CARDS
     # ---------------------------------------------------------
     st.markdown("""
     <style>
@@ -154,7 +157,7 @@ with tab1:
             border-radius: 8px;
             border-left: 5px solid #2542e6;
             box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-            height: 140px; /* Altura fixa para alinhar */
+            height: 140px;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
@@ -175,125 +178,157 @@ with tab1:
     </style>
     """, unsafe_allow_html=True)
     
-    for index, row in df_filtered_metrics.iterrows():
-        st.markdown("#### " + row['area'] + " - " + row['type'])
-
-        garantia_minima = row['goal']
-        liberado_total = row['released']
-        executado_total = row['done']
-
-        meta_operacional_periodo = df_filtered[(df_filtered['equipment_area'] == row['area']) & (df_filtered['maintenance_type'] == row['type'])]['meta_turno'].sum()
-
-        perc_liberado = (liberado_total / garantia_minima * 100) if garantia_minima > 0 else 0
-        perc_produtividade = (executado_total / meta_operacional_periodo * 100) if meta_operacional_periodo > 0 else 0
-
-        pendente_execucao = liberado_total - executado_total
-        perc_pendente_exec = (pendente_execucao / liberado_total * 100) if liberado_total > 0 else 0
-
-        pendente_liberar = garantia_minima - liberado_total
-        perc_pendente_lib = (pendente_liberar / garantia_minima * 100) if garantia_minima > 0 else 0
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-
-        with c1:
-            # Garantia Mínima é a referência base (100%)
-            st.markdown(card_html(
-                "Garantia Mínima", 
-                f"{garantia_minima:,.0f}", 
-                "Contrato", 
-                100.0, 
-                "#3498db"
-            ), unsafe_allow_html=True)
+    # Verifica se existem dados nas métricas
+    if df_filtered_metrics.empty:
+        st.info("Nenhuma meta contratual encontrada para os filtros selecionados.")
+    else:
+        # Identifica os Tipos de Manutenção únicos na view de consolidação
+        unique_types = sorted(df_filtered_metrics['maintenance_type'].unique())
         
-        with c2:
-            st.markdown(card_html(
-                "Liberado (Eng.)", 
-                f"{liberado_total:,.0f}", 
-                f"{garantia_minima:,.0f}", # Meta é a Garantia
-                perc_liberado, 
-                "#9b59b6"
-            ), unsafe_allow_html=True)
+        # LOOP 1: Para cada Tipo de Manutenção (Agrupador Principal)
+        for m_type in unique_types:
             
-        with c3:
-            st.markdown(card_html(
-                "Executado (Campo)", 
-                f"{executado_total:,.0f}", 
-                f"{meta_operacional_periodo:,.0f}", # Meta é o planejado operacional
-                perc_produtividade, 
-                "#2ecc71"
-            ), unsafe_allow_html=True)
+            st.markdown(f"## 🛠️ {m_type}")
+            st.markdown("---")
             
-        with c4:
-            st.markdown(card_html(
-                "Pendente Execução", 
-                f"{pendente_execucao:,.0f}", 
-                f"{liberado_total:,.0f}", # Base é o Liberado
-                perc_pendente_exec, 
-                "#f1c40f",
-                invert_logic=True # Queremos que seja baixo
-            ), unsafe_allow_html=True)
+            # Filtra os DFs para este Tipo de Manutenção
+            df_metrics_type = df_filtered_metrics[df_filtered_metrics['maintenance_type'] == m_type]
+            df_op_type = df_filtered[df_filtered['maintenance_type'] == m_type]
             
-        with c5:
-            st.markdown(card_html(
-                "Pendente Liberar", 
-                f"{pendente_liberar:,.0f}", 
-                f"{garantia_minima:,.0f}", # Base é a Garantia
-                perc_pendente_lib, 
-                "#e74c3c",
-                invert_logic=True
-            ), unsafe_allow_html=True)
+            # LOOP 2: Para cada Área dentro deste Tipo
+            for index, row in df_metrics_type.iterrows():
+                area_nome = row['area']
+                
+                # Subtítulo da Área
+                st.markdown(f"#### 📍 Área: {area_nome}")
 
-    st.divider()
+                # Variáveis Macro
+                garantia_minima = row['goal']
+                liberado_total = row['released']
+                executado_total = row['done']
 
-    c_chart1, c_chart2 = st.columns(2)
+                # Meta Operacional do período filtrado
+                meta_operacional_periodo = df_op_type[df_op_type['equipment_area'] == area_nome]['meta_turno'].sum()
 
-    with c_chart1:
-        st.subheader("Produção por Turno")
-        df_shift = df_filtered.groupby('shift_name')[['quantity', 'meta_turno']].sum().reset_index()
+                # Cálculos
+                perc_liberado = (liberado_total / garantia_minima * 100) if garantia_minima > 0 else 0
+                perc_produtividade = (executado_total / meta_operacional_periodo * 100) if meta_operacional_periodo > 0 else 0
 
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
-            x=df_shift['shift_name'], y=df_shift['quantity'], name='Executado', marker_color='#00CC96'
-        ))
-        fig_bar.add_trace(go.Bar(
-            x=df_shift['shift_name'], y=df_shift['meta_turno'], name='Meta', marker_color='#FF4B4B'
-        ))
+                pendente_execucao = liberado_total - executado_total
+                perc_pendente_exec = (pendente_execucao / liberado_total * 100) if liberado_total > 0 else 0
 
-        fig_bar.update_layout(barmode='group', height=400)
-        st.plotly_chart(fig_bar, use_container_width=True, key="bar_tab1_v2")
-    
-    with c_chart2:
-        st.subheader("Produção por Equipamento")
-        df_shift = df_filtered.groupby('equipment_tag')[['quantity', 'meta_turno']].sum().reset_index()
+                pendente_liberar = garantia_minima - liberado_total
+                perc_pendente_lib = (pendente_liberar / garantia_minima * 100) if garantia_minima > 0 else 0
 
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
-            x=df_shift['equipment_tag'], y=df_shift['quantity'], name='Executado', marker_color='#00CC96'
-        ))
-        fig_bar.add_trace(go.Bar(
-            x=df_shift['equipment_tag'], y=df_shift['meta_turno'], name='Meta', marker_color='#FF4B4B'
-        ))
+                # Renderização dos 5 Cards
+                c1, c2, c3, c4, c5 = st.columns(5)
 
-        fig_bar.update_layout(barmode='group', height=400)
-        st.plotly_chart(fig_bar, use_container_width=True, key="bar_tab1_v3")
-    
-    st.divider()
+                with c1:
+                    st.markdown(card_html(
+                        "Garantia Mínima", 
+                        f"{garantia_minima:,.0f}", 
+                        "Contrato", 
+                        100.0, 
+                        "#3498db"
+                    ), unsafe_allow_html=True)
+                
+                with c2:
+                    st.markdown(card_html(
+                        "Liberado (Eng.)", 
+                        f"{liberado_total:,.0f}", 
+                        f"{garantia_minima:,.0f}", 
+                        perc_liberado, 
+                        "#9b59b6"
+                    ), unsafe_allow_html=True)
+                    
+                with c3:
+                    st.markdown(card_html(
+                        "Executado (Campo)", 
+                        f"{executado_total:,.0f}", 
+                        f"{meta_operacional_periodo:,.0f}", 
+                        perc_produtividade, 
+                        "#2ecc71"
+                    ), unsafe_allow_html=True)
+                    
+                with c4:
+                    st.markdown(card_html(
+                        "Pendente Execução", 
+                        f"{pendente_execucao:,.0f}", 
+                        f"{liberado_total:,.0f}", 
+                        perc_pendente_exec, 
+                        "#f1c40f",
+                        invert_logic=True 
+                    ), unsafe_allow_html=True)
+                    
+                with c5:
+                    st.markdown(card_html(
+                        "Pendente Liberar", 
+                        f"{pendente_liberar:,.0f}", 
+                        f"{garantia_minima:,.0f}", 
+                        perc_pendente_lib, 
+                        "#e74c3c",
+                        invert_logic=True
+                    ), unsafe_allow_html=True)
+                
+                st.markdown("<br>", unsafe_allow_html=True) # Espaço entre as áreas
 
-    df_daily = df_filtered.groupby('date')[['quantity', 'meta_turno']].sum().reset_index()
+            # ---------------------------------------------------------
+            # GRÁFICOS DO TIPO DE MANUTENÇÃO (Exibidos após os cards das áreas)
+            # ---------------------------------------------------------
+            st.markdown(f"#### 📊 Resumo Operacional - {m_type}")
+            
+            c_chart1, c_chart2 = st.columns(2)
 
-    if not df_daily.empty:
-        fig_line = px.line(
-            df_daily,
-            x='date',
-            y=['quantity', 'meta_turno'],
-            labels={'date': 'Data', 'value': 'Quantidade', 'variable': 'Tipo'},
-            title='Curva de Produção Diária',
-            color_discrete_map={'quantity': '#00CC96', 'meta_turno': '#FF4B4B'}
-        )
+            with c_chart1:
+                st.subheader("Produção por Turno")
+                df_shift = df_op_type.groupby('shift_name')[['quantity', 'meta_turno']].sum().reset_index()
 
-        fig_line.update_layout(height=400)
-        st.plotly_chart(fig_line, use_container_width=True, key="line_tab1_v1")
+                fig_bar = go.Figure()
+                fig_bar.add_trace(go.Bar(
+                    x=df_shift['shift_name'], y=df_shift['quantity'], name='Executado', marker_color='#00CC96'
+                ))
+                fig_bar.add_trace(go.Bar(
+                    x=df_shift['shift_name'], y=df_shift['meta_turno'], name='Meta', marker_color='#FF4B4B'
+                ))
 
+                fig_bar.update_layout(barmode='group', height=400)
+                # Adiciona o m_type na KEY para evitar o erro "Duplicate Widget ID"
+                st.plotly_chart(fig_bar, use_container_width=True, key=f"bar_turno_tab1_{m_type}")
+            
+            with c_chart2:
+                st.subheader("Produção por Equipamento")
+                df_equip = df_op_type.groupby('equipment_tag')[['quantity', 'meta_turno']].sum().reset_index()
+
+                fig_bar2 = go.Figure()
+                fig_bar2.add_trace(go.Bar(
+                    x=df_equip['equipment_tag'], y=df_equip['quantity'], name='Executado', marker_color='#00CC96'
+                ))
+                fig_bar2.add_trace(go.Bar(
+                    x=df_equip['equipment_tag'], y=df_equip['meta_turno'], name='Meta', marker_color='#FF4B4B'
+                ))
+
+                fig_bar2.update_layout(barmode='group', height=400)
+                st.plotly_chart(fig_bar2, use_container_width=True, key=f"bar_equip_tab1_{m_type}")
+            
+            st.divider()
+
+            df_daily = df_op_type.groupby('date')[['quantity', 'meta_turno']].sum().reset_index()
+
+            if not df_daily.empty:
+                fig_line = px.line(
+                    df_daily,
+                    x='date',
+                    y=['quantity', 'meta_turno'],
+                    labels={'date': 'Data', 'value': 'Quantidade', 'variable': 'Tipo'},
+                    title=f'Curva de Produção Diária - {m_type}',
+                    color_discrete_map={'quantity': '#00CC96', 'meta_turno': '#FF4B4B'}
+                )
+
+                fig_line.update_layout(height=400)
+                st.plotly_chart(fig_line, use_container_width=True, key=f"line_tab1_{m_type}")
+            
+            # Dá um respiro grande antes de começar o próximo TIPO DE MANUTENÇÃO
+            st.markdown("<br><br>", unsafe_allow_html=True)
 # ==========================================
 # ABA 2: ACOMPANHAMENTO DETALHADO (POR TAG E TIPO)
 # ==========================================
@@ -348,40 +383,32 @@ with tab2:
                 df_tag_day = df_type_subset[df_type_subset['Tag'] == tag].copy()
                 
                 # B. Dados do CICLO/HISTÓRICO (para os acumulados - KPIs)
-                # Buscamos no df_filtered (global) para pegar o histórico até hoje
                 df_tag_history = df_filtered[
                     (df_filtered['equipment_tag'] == tag) & 
                     (df_filtered['date'] <= selected_date)
                 ]
                 
                 # C. Cálculos dos KPIs
-                # Total Tubos (Capacidade)
                 total_tubos = df_tag_history['total_tubos'].max() if 'total_tubos' in df_tag_history.columns else 0
-                
-                # Mapeado (Meta Total da Manutenção)
-                # Se não houver coluna específica de escopo, assumimos igual ao total de tubos
                 total_mapeado = total_tubos
-                
-                # Acumulado Executado
                 acumulado_exec = df_tag_history['quantity'].sum()
-                
-                # Pendente
                 pendente = total_mapeado - acumulado_exec
                 perc_concluido = (acumulado_exec / total_mapeado * 100) if total_mapeado > 0 else 0
-                
-                # Meta do Turno Atual
                 meta_turno_val = df_tag_day['Meta'].max()
+
+                # D. Captura Datas e Status (Tenta pegar da primeira linha)
+                dt_inicio = df_tag_day['maint_start_date'].iloc[0] if 'maint_start_date' in df_tag_day.columns else '-'
+                dt_previsto = df_tag_day['maint_due_date'].iloc[0] if 'maint_due_date' in df_tag_day.columns else '-'
+                dt_real = df_tag_day['maint_real_due_date'].iloc[0] if 'maint_real_due_date' in df_tag_day.columns else '-'
+                st_maint = df_tag_day['maint_status'].iloc[0] if 'maint_status' in df_tag_day.columns else '-'
 
                 # --- VISUALIZAÇÃO DO CARTÃO (LARGURA TOTAL) ---
                 
                 with st.container(border=True):
                     
-                    # Layout Interno do Cartão: Título à esquerda, KPIs à direita
-                    # Isso otimiza o uso da largura total
-                    
                     # 1. HEADER INTEGRADO
                     st.markdown(f"""
-                        <div style="background-color: #2542e6; color: white; padding: 10px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <div style="background-color: #2542e6; color: white; padding: 10px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                             <div style="font-size: 1.2em; font-weight: bold; padding-left: 10px;">
                                 🏭 {tag}
                             </div>
@@ -391,10 +418,19 @@ with tab2:
                         </div>
                     """, unsafe_allow_html=True)
                     
+                    # 1.5. BARRA DE STATUS E DATAS (NOVO)
+                    st.markdown(f"""
+                        <div style="background-color: #2b2b36; border-left: 3px solid #f1c40f; padding: 8px 12px; border-radius: 4px; margin-bottom: 15px; font-size: 13px; color: #e0e0e0; display: flex; justify-content: space-between;">
+                            <div><strong>STATUS:</strong> <span style="color: #f1c40f;">{str(st_maint).upper()}</span></div>
+                            <div><strong>INÍCIO:</strong> {dt_inicio}</div>
+                            <div><strong>TÉRMINO PREVISTO:</strong> {dt_previsto}</div>
+                            <div><strong>TÉRMINO REAL:</strong> {dt_real}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
                     # 2. KPIs SUPERIORES (4 Colunas)
                     c_kpi1, c_kpi2, c_kpi3, c_kpi4 = st.columns(4)
                     
-                    # Estilo CSS inline para padronizar
                     lbl_style = "font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px;"
                     val_style = "font-size: 20px; font-weight: bold; color: #fff;"
                     
@@ -417,7 +453,7 @@ with tab2:
                     # 3. TABELA DE TURNOS (Largura Total)
                     st.dataframe(
                         df_tag_day[['Turno', 'Realizado', 'Desvio', 'Status', 'Observações']],
-                        use_container_width=True, # Garante que ocupe a tela toda
+                        use_container_width=True, 
                         hide_index=True,
                         column_config={
                             "Turno": st.column_config.TextColumn("Turno", width="small"),
