@@ -4,11 +4,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from supabase import create_client
 from datetime import date, timedelta
+import matplotlib.pyplot as plt
+from io import BytesIO
 
 from utils import get_fiscal_period
 from custom_cards import card_html
 from shifts import prepare_shift_dataframe
-from pdf import create_pdf_report
+from pdf import create_pdf_report, create_one_page_type_report, create_one_page_a3_report
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO E ESTILOS
@@ -85,6 +87,37 @@ def load_data(start_date, end_date):
             
     return df
 
+@st.cache_data(ttl=60)
+def load_impacts_data():
+    """Busca TODO o histórico de impactos com TAGs e calcula as horas."""
+    # Query que faz o join com as manutenções e equipamentos para pegar a TAG e o Tipo
+    response = supabase.table("maintenance_impacts")\
+        .select("*, maintenances(type, equipments(tag))")\
+        .execute()
+    
+    df_imp = pd.DataFrame(response.data)
+    
+    if not df_imp.empty:
+        # Extrai a Tag e o Tipo do JSON retornado pelo Supabase
+        df_imp['equipment_tag'] = df_imp['maintenances'].apply(lambda x: x['equipments']['tag'] if x and x.get('equipments') else 'N/A')
+        df_imp['Tipo'] = df_imp['maintenances'].apply(lambda x: x['type'] if x else 'N/A')
+        
+        # Converte datas
+        df_imp['start_time'] = pd.to_datetime(df_imp['start_time'])
+        # Se não tiver end_time, assume o tempo atual (ou 0, ajuste conforme sua regra)
+        df_imp['end_time'] = pd.to_datetime(df_imp['end_time']).fillna(pd.Timestamp.now(tz='UTC'))
+        
+        # Calcula as HORAS de impacto
+        df_imp['horas'] = (df_imp['end_time'] - df_imp['start_time']).dt.total_seconds() / 3600.0
+        df_imp['date'] = df_imp['start_time'].dt.date
+        
+        # Separa a Categoria da Descrição
+        split_desc = df_imp['description'].str.split(' - ', n=1, expand=True)
+        df_imp['Categoria'] = split_desc[0].str.strip()
+        df_imp['Detalhe'] = split_desc[1].str.strip() if split_desc.shape[1] > 1 else df_imp['description']
+        df_imp['Categoria'] = df_imp.apply(lambda x: 'OUTROS' if pd.isna(x['Detalhe']) else x['Categoria'], axis=1)
+        
+    return df_imp
 
 @st.cache_data(ttl=60)
 def get_kpi_totals(start_date, end_date):
@@ -340,14 +373,22 @@ with tab2:
     
     # 1. Gera o DataFrame consolidado do DIA
     df_daily_shifts = prepare_shift_dataframe(df_filtered, selected_date)
+    # No seu app.py, antes do botão do PDF:
+    df_impacts_all = load_impacts_data()
+
+    # Filtra apenas os do dia selecionado para o resumo final
+    df_impacts_today = df_impacts_all[df_impacts_all['date'] == selected_date] if not df_impacts_all.empty else pd.DataFrame()
 
     with col_btn:
         if not df_daily_shifts.empty:
             # Gera o PDF em memória
-            pdf_bytes = create_pdf_report(
-                df_daily_shifts,    # Dados do dia (tabelas)
-                df_filtered,        # Dados historicos (KPIs acumulados)
-                selected_date.strftime('%d/%m/%Y')
+            # Passa para a função
+            pdf_bytes = create_one_page_a3_report(
+                df_daily_shifts,    
+                df_filtered,        
+                selected_date.strftime('%d/%m/%Y'),
+                df_impacts_all,    # O histórico (Para os graficos dos equipamentos)
+                df_impacts_today   # O do dia (Para o resumo no final do arquivo)
             )
             
             st.download_button(
@@ -435,7 +476,7 @@ with tab2:
                     val_style = "font-size: 20px; font-weight: bold; color: #fff;"
                     
                     with c_kpi1:
-                        st.markdown(f"<div><div style='{lbl_style}'>Capacidade Total</div><div style='{val_style}'>{total_tubos:.0f}</div></div>", unsafe_allow_html=True)
+                        st.markdown(f"<div><div style='{lbl_style}'>Total de Tubos</div><div style='{val_style}'>{total_tubos:.0f}</div></div>", unsafe_allow_html=True)
                     with c_kpi2:
                         st.markdown(f"<div><div style='{lbl_style}'>Mapeado</div><div style='{val_style}'>{total_mapeado:.0f}</div></div>", unsafe_allow_html=True)
                     with c_kpi3:
